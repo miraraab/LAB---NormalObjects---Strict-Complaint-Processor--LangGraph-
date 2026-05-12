@@ -1,5 +1,5 @@
-# normalobjects_langgraph.py
 import os
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from typing import TypedDict, List, Optional
 from langgraph.graph import StateGraph, END
@@ -17,40 +17,49 @@ llm = ChatOpenAI(
 )
 
 print("✓ Setup complete")
+
 # ============================================================
 # STATE DEFINITION
 # ============================================================
 class ComplaintState(TypedDict):
-    complaint: str                    # Original complaint text
-    category: Optional[str]           # portal/monster/psychic/environmental/other
-    is_valid: Optional[bool]          # Passed validation?
-    rejection_reason: Optional[str]   # Why rejected (if applicable)
-    investigation_notes: Optional[str] # Findings from investigation
-    resolution: Optional[str]         # Applied resolution
-    effectiveness: Optional[str]      # high/medium/low
+    complaint: str
+    category: Optional[str]
+    is_valid: Optional[bool]
+    rejection_reason: Optional[str]
+    investigation_notes: Optional[str]
+    resolution: Optional[str]
+    effectiveness: Optional[str]
     satisfaction_verified: Optional[bool]
-    workflow_path: List[str]          # Tracks which nodes were visited
-    status: Optional[str]             # Current workflow status
-    timestamp: Optional[str]          # Closure timestamp
-    # ============================================================
+    workflow_path: List[str]
+    status: Optional[str]
+    timestamp: Optional[str]
+    follow_up_required: Optional[bool]
+    follow_up_date: Optional[str]
+
+
+# ============================================================
 # NODE 1: INTAKE
 # ============================================================
 def intake_node(state: ComplaintState) -> ComplaintState:
     print("\n[INTAKE] Processing complaint...")
     complaint = state["complaint"]
 
-    prompt = f"""Categorize this Downside Up complaint into exactly one category:
-- portal: Issues with portal timing, location, or behavior
-- monster: Issues with creature behavior (demogorgons, etc.)
-- psychic: Issues with psychic abilities or limitations
-- environmental: Issues with electricity, weather, or physical environment
-- other: Anything else
+    categorization_prompt = f"""You are categorizing complaints for the Downside Up Complaint Bureau.
+Map the complaint to EXACTLY ONE of these categories:
+
+- portal: portal timing, location, behavior, schedule, or schedule irregularities
+- monster: demogorgons, creatures, creature behavior, interactions, aggression, cooperation
+- psychic: telekinesis, psychic abilities, mental powers, ability limits, El
+- environmental: power lines, electricity, weather, atmospheric phenomena, physical environment — INCLUDING creature interactions WITH power lines or electrical infrastructure
+- other: anything that doesn't clearly fit above
+
+IMPORTANT: If the complaint mentions power lines, electricity, or atmospheric/physical phenomena — even combined with creatures — categorize as 'environmental', not 'other'.
 
 Complaint: {complaint}
 
-Respond with ONLY the category name."""
+Respond with ONLY one word: portal, monster, psychic, environmental, or other."""
 
-    response = llm.invoke([HumanMessage(content=prompt)])
+    response = llm.invoke([HumanMessage(content=categorization_prompt)])
     category = response.content.strip().lower()
 
     print(f"[INTAKE] Category: {category}")
@@ -60,6 +69,8 @@ Respond with ONLY the category name."""
         "workflow_path": state.get("workflow_path", []) + ["intake"],
         "status": "intake"
     }
+
+
 # ============================================================
 # NODE 2: VALIDATE
 # ============================================================
@@ -107,6 +118,8 @@ REASON: one sentence explanation"""
         "workflow_path": state.get("workflow_path", []) + ["validate"],
         "status": "valid" if is_valid else "rejected"
     }
+
+
 # ============================================================
 # ROUTING: after validate
 # ============================================================
@@ -116,7 +129,9 @@ def route_after_validation(state: ComplaintState) -> str:
     else:
         print(f"\n[REJECTED] {state['rejection_reason']}")
         return END
-    # ============================================================
+
+
+# ============================================================
 # NODE 3: INVESTIGATE
 # ============================================================
 def investigate_node(state: ComplaintState) -> ComplaintState:
@@ -148,6 +163,8 @@ Be specific and reference the complaint details."""
         "workflow_path": state.get("workflow_path", []) + ["investigate"],
         "status": "investigated"
     }
+
+
 # ============================================================
 # NODE 4: RESOLVE
 # ============================================================
@@ -159,26 +176,44 @@ def resolve_node(state: ComplaintState) -> ComplaintState:
     prompt = f"""You are a resolution specialist at the Downside Up Bureau.
 
 Category: {category}
+Original complaint: {state["complaint"]}
 Investigation findings: {investigation_notes}
 
 Rules:
 - Resolution must be specific to the category
 - Must reference established Downside Up procedures
 - Environmental or monster cases may require specialist team escalation
-- End your response with: EFFECTIVENESS: high/medium/low
 
-Write a resolution (3-4 sentences) then rate effectiveness."""
+Effectiveness rating — judge based on the ORIGINAL COMPLAINT specificity:
+- high: Complaint names specific entity, location, or mechanism (e.g. "Demogorgons", "the portal on Elm Street", "El's telekinesis")
+- medium: Complaint describes a real phenomenon but lacks location or timing details
+- low: Complaint is purely vague with no specific entity or phenomenon (e.g. "weird things", "not sure", "I guess")
+
+Named creatures, abilities, or Downside Up phenomena always count as specific → never low.
+
+Write a resolution (3-4 sentences) then on the last line write exactly:
+EFFECTIVENESS: high
+or
+EFFECTIVENESS: medium
+or
+EFFECTIVENESS: low"""
 
     response = llm.invoke([HumanMessage(content=prompt)])
     full_response = response.content.strip()
 
-    # Extract effectiveness rating
-    effectiveness = "medium"  # default
+    effectiveness = "medium"
     for line in full_response.split("\n"):
         if "EFFECTIVENESS:" in line.upper():
             rating = line.split(":")[-1].strip().lower()
             if rating in ["high", "medium", "low"]:
                 effectiveness = rating
+
+    # Rule-based override: vague complaints → always low
+    VAGUE_KEYWORDS = ["i guess", "not sure", "hard to say", "weird things", "stuff", "i think", "don't know", "can't explain"]
+    complaint_lower = state["complaint"].lower()
+    if any(kw in complaint_lower for kw in VAGUE_KEYWORDS):
+        effectiveness = "low"
+        print(f"[RESOLVE] Overridden to low — vague complaint detected")
 
     print(f"[RESOLVE] Effectiveness: {effectiveness}")
     return {
@@ -188,42 +223,47 @@ Write a resolution (3-4 sentences) then rate effectiveness."""
         "workflow_path": state.get("workflow_path", []) + ["resolve"],
         "status": "resolved"
     }
+
+
 # ============================================================
 # NODE 5: CLOSE
 # ============================================================
 def close_node(state: ComplaintState) -> ComplaintState:
     print("\n[CLOSE] Closing complaint...")
-    from datetime import datetime
 
-    effectiveness = state["effectiveness"]
-    followup = effectiveness == "low"
+    effectiveness = state.get("effectiveness", "medium")
+    follow_up_required = effectiveness == "low"
+    follow_up_date = None
+
+    if follow_up_required:
+        follow_up_date = (datetime.now() + timedelta(days=30)).isoformat()
+        print(f"[CLOSE] ⚠ Low effectiveness — 30-day follow-up scheduled: {follow_up_date}")
 
     print(f"[CLOSE] Category: {state['category']}")
     print(f"[CLOSE] Resolution applied ✓")
     print(f"[CLOSE] Satisfaction verified ✓")
-    if followup:
-        print(f"[CLOSE] ⚠ Low effectiveness → 30-day follow-up scheduled")
 
     return {
         **state,
-        "satisfaction_verified": True,
-        "timestamp": datetime.now().isoformat(),
+        "status": "closed",
         "workflow_path": state.get("workflow_path", []) + ["close"],
-        "status": "closed"
+        "timestamp": datetime.now().isoformat(),
+        "follow_up_required": follow_up_required,
+        "follow_up_date": follow_up_date
     }
+
+
 # ============================================================
 # BUILD GRAPH
 # ============================================================
 workflow = StateGraph(ComplaintState)
 
-# Add nodes
 workflow.add_node("intake", intake_node)
 workflow.add_node("validate", validate_node)
 workflow.add_node("investigate", investigate_node)
 workflow.add_node("resolve", resolve_node)
 workflow.add_node("close", close_node)
 
-# Define edges
 workflow.set_entry_point("intake")
 workflow.add_edge("intake", "validate")
 workflow.add_conditional_edges("validate", route_after_validation, {
@@ -234,29 +274,68 @@ workflow.add_edge("investigate", "resolve")
 workflow.add_edge("resolve", "close")
 workflow.add_edge("close", END)
 
-# Compile
 app = workflow.compile()
 print("✓ Graph compiled")
 
 # ============================================================
+# VISUALIZATION
+# ============================================================
+
+def print_graph_structure():
+    """Print the static workflow graph as Mermaid (renders on GitHub)."""
+    print("\n" + "="*60)
+    print("WORKFLOW GRAPH (Mermaid)")
+    print("="*60)
+    print(app.get_graph().draw_mermaid())
+
+
+def visualize_complaint_path(complaint_text: str, result: ComplaintState):
+    """Print ASCII visualization of the path taken for one complaint."""
+    ALL_NODES = ["intake", "validate", "investigate", "resolve", "close"]
+    path = result.get("workflow_path", [])
+
+    print("\n── WORKFLOW PATH ──")
+    parts = []
+    for node in ALL_NODES:
+        if node in path:
+            parts.append(f"[{node} ✓]")
+        else:
+            parts.append(f"[{node} ✗]")
+
+    print(" → ".join(parts))
+
+    status = result.get("status")
+    if status == "rejected":
+        print(f"  ↳ REJECTED at validate — did not proceed")
+    elif status == "closed":
+        effectiveness = result.get("effectiveness", "N/A")
+        print(f"  ↳ CLOSED — effectiveness: {effectiveness.upper()}")
+        if result.get("follow_up_required"):
+            print(f"  ↳ ⚠ Follow-up scheduled: {result.get('follow_up_date')}")
+
+# ============================================================
 # TEST COMPLAINTS
 # ============================================================
+
+print_graph_structure()
+
 test_complaints = [
     "The Downside Up portal opens at different times each day. How do I predict when?",
     "Demogorgons sometimes work together and sometimes fight. What's their deal?",
     "El can move things with her mind but can't lift heavy rocks. Why?",
     "Why do creatures and power lines react so strangely together?",
-    "This is not a valid complaint about something random"
+    "This is not a valid complaint about something random",
+    "My psychic stuff doesn't really work right, I guess. Hard to say what's wrong exactly."
 ]
 
-print("\n" + "="*60)
+print("\n" + "=" * 60)
 print("BLOYCE'S PROTOCOL — COMPLAINT PROCESSOR")
-print("="*60)
+print("=" * 60)
 
 for i, complaint in enumerate(test_complaints, 1):
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"COMPLAINT {i}: {complaint[:60]}...")
-    print("="*60)
+    print("=" * 60)
 
     initial_state: ComplaintState = {
         "complaint": complaint,
@@ -269,7 +348,9 @@ for i, complaint in enumerate(test_complaints, 1):
         "satisfaction_verified": None,
         "workflow_path": [],
         "status": None,
-        "timestamp": None
+        "timestamp": None,
+        "follow_up_required": None,
+        "follow_up_date": None
     }
 
     result = app.invoke(initial_state)
@@ -280,3 +361,7 @@ for i, complaint in enumerate(test_complaints, 1):
     print(f"Status:      {result['status']}")
     print(f"Effective:   {result.get('effectiveness', 'N/A')}")
     print(f"Timestamp:   {result.get('timestamp', 'N/A')}")
+    if result.get("follow_up_required"):
+        print(f"Follow-up:   {result.get('follow_up_date')}")
+    
+    visualize_complaint_path(complaint, result)
