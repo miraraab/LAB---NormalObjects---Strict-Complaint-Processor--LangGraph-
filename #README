@@ -1,0 +1,33 @@
+# NormalObjects – Strict Complaint Processor (LangGraph)
+
+A rule-based complaint processing system for the Downside Up Bureau, built with LangGraph.
+
+## Setup
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install langgraph langchain langchain-openai python-dotenv
+```
+
+Add your OpenAI API key to `.env`:
+## Run
+
+```bash
+python normalobjects_langgraph.py
+```
+
+## File Structure
+
+| File | Description |
+|------|-------------|
+| `normalobjects_langgraph.py` | Main LangGraph implementation |
+| `lab_summary.md` | LangGraph vs LangChain comparison |
+| `.env` | API keys (not committed) |
+| `.gitignore` | Ignores .env and .venv |
+
+## Workflow
+
+`intake → validate → investigate → resolve → close`
+
+Invalid complaints are rejected after validation and do not proceed further.
